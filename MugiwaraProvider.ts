@@ -222,9 +222,11 @@ class Provider {
 
     async search(opts: SearchOptions): Promise<SearchResult[]> {
         console.log(`🔍 Recherche pour: "${opts.query}"`);
+        console.log(`📝 Détails:`, { dub: opts.dub, format: opts.media.format });
         
         try {
             // Charger le catalogue
+            console.log(`📡 Chargement du catalogue: ${this.CATALOGUE_URL}`);
             const response = await fetch(this.CATALOGUE_URL);
             if (!response.ok) {
                 console.error(`❌ Erreur HTTP catalogue: ${response.status}`);
@@ -232,33 +234,60 @@ class Provider {
             }
             
             const html = await response.text();
+            console.log(`✅ HTML reçu, taille: ${html.length} caractères`);
+            
             const $ = await LoadDoc(html);
             
             // Normaliser la requête de recherche
             const searchTerms = this.normalizeString(opts.query).split(' ');
+            console.log(`🔤 Termes de recherche:`, searchTerms);
+            
             const results: SearchResult[] = [];
             
-            // Parser tous les animes du catalogue
-            const animeLinks = $("a[href^='/catalogue/']");
+            // DEBUG: Essayer plusieurs sélecteurs
+            console.log(`🔎 Recherche des liens d'animes...`);
+            let animeLinks = $("a[href^='/catalogue/']");
+            console.log(`📌 Sélecteur 1 - a[href^='/catalogue/']: ${animeLinks.length()} éléments`);
             
-            for (let i = 0; i < animeLinks.length(); i++) {
+            if (animeLinks.length() === 0) {
+                animeLinks = $("a[href*='catalogue']");
+                console.log(`📌 Sélecteur 2 - a[href*='catalogue']: ${animeLinks.length()} éléments`);
+            }
+            
+            if (animeLinks.length() === 0) {
+                animeLinks = $("a");
+                console.log(`📌 Sélecteur 3 - tous les <a>: ${animeLinks.length()} éléments`);
+            }
+            
+            // Parser tous les animes
+            console.log(`🔄 Parsing de ${animeLinks.length()} liens...`);
+            for (let i = 0; i < Math.min(animeLinks.length(), 50); i++) {
                 const element = animeLinks.eq(i);
                 const href = element.attr("href");
                 
                 if (!href || href === "/catalogue") continue;
                 
-                // Chercher le titre (peut être dans h3, h2, ou texte direct)
+                // Chercher le titre
                 let title = element.find("h3").text().trim() || 
-                           element.find("h2").text().trim() || 
+                           element.find("h2").text().trim() ||
+                           element.find("h1").text().trim() ||
+                           element.attr("title") ||
                            element.text().trim();
                 
-                if (!title) continue;
+                if (!title || title.length < 2) continue;
+                
+                // Debug premiers résultats
+                if (i < 5) {
+                    console.log(`📺 Anime ${i + 1}: "${title}" -> ${href}`);
+                }
                 
                 // Calculer le score de correspondance
                 const matchScore = this.calculateMatchScore(title, searchTerms);
                 
                 if (matchScore > 0.3) {
                     const animeUrl = href.startsWith('http') ? href : this.SITE_URL + href;
+                    
+                    console.log(`✨ Match trouvé (score: ${matchScore.toFixed(2)}): "${title}"`);
                     
                     results.push({
                         id: animeUrl,
@@ -276,7 +305,13 @@ class Provider {
                 return scoreB - scoreA;
             });
             
-            console.log(`✅ Trouvé ${results.length} résultat(s)`);
+            console.log(`✅ Trouvé ${results.length} résultat(s) total`);
+            
+            if (results.length === 0) {
+                console.warn(`⚠️ Aucun résultat trouvé pour "${opts.query}"`);
+                console.warn(`💡 Vérifiez les logs ci-dessus pour voir les animes disponibles`);
+            }
+            
             return results.slice(0, 10);
             
         } catch (error) {
