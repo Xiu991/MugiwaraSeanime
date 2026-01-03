@@ -22,6 +22,21 @@ console.log = function (...args: any[]) {
 
 //#endregion
 
+//#region Types
+
+interface MugiwaraAnime {
+    title: string;
+    url: string;
+    image: string;
+}
+
+interface MugiwaraSeason {
+    number: number;
+    url: string;
+}
+
+//#endregion
+
 class Provider {
 
     //#region Variables
@@ -37,11 +52,13 @@ class Provider {
     getSettings(): Settings {
         return {
             episodeServers: [
-                "streamsb",
+                "sibnet",
+                "sendvid",
                 "doodstream",
-                "mixdrop",
                 "voe",
-                "streamtape"
+                "mixdrop",
+                "streamtape",
+                "vidmoly"
             ],
             supportsDub: true,
         };
@@ -49,233 +66,41 @@ class Provider {
 
     //#endregion
 
-    //#region Méthodes principales
+    //#region Utility Methods
 
-    async search(opts: SearchOptions): Promise<SearchResult[]> {
-        console.log(`🔍 Recherche pour: "${opts.query}"`);
-        
+    private async fetchWithProxy(url: string): Promise<string> {
         try {
-            // Mugiwara n'a pas d'API de recherche publique
-            // On va charger le catalogue et chercher dedans
-            const catalogueResponse = await fetch(this.CATALOGUE_URL);
-            if (!catalogueResponse.ok) {
-                console.error(`❌ Erreur HTTP catalogue: ${catalogueResponse.status}`);
-                return [];
-            }
-            
-            const html = await catalogueResponse.text();
-            const $ = await LoadDoc(html);
-            
-            // Normaliser la requête de recherche
-            const query = opts.query.toLowerCase()
-                .replace(/[:']/g, ' ')
-                .replace(/\s+/g, ' ')
-                .trim();
-            
-            const searchTerms = query.split(' ');
-            const results: SearchResult[] = [];
-            
-            // Parser tous les animes du catalogue
-            $("a[href^='/catalogue/']").each((i, element) => {
-                const href = $(element).attr("href");
-                const title = $(element).find("h3").text() || $(element).text();
-                
-                if (!href || !title || href === "/catalogue") return;
-                
-                // Normaliser le titre pour la comparaison
-                const normalizedTitle = title.toLowerCase()
-                    .replace(/[:']/g, ' ')
-                    .replace(/\s+/g, ' ')
-                    .trim();
-                
-                // Vérifier si le titre correspond à la recherche
-                const matchScore = this.calculateMatchScore(normalizedTitle, searchTerms);
-                
-                if (matchScore > 0.3) { // Seuil de pertinence
-                    const animeUrl = href.startsWith('http') ? href : this.SITE_URL + href;
-                    
-                    results.push({
-                        id: animeUrl,
-                        title: title,
-                        url: animeUrl,
-                        subOrDub: opts.dub ? "dub" : "sub",
-                    });
-                }
-            });
-            
-            // Trier par pertinence
-            results.sort((a, b) => {
-                const scoreA = this.calculateMatchScore(a.title.toLowerCase(), searchTerms);
-                const scoreB = this.calculateMatchScore(b.title.toLowerCase(), searchTerms);
-                return scoreB - scoreA;
-            });
-            
-            console.log(`✅ Trouvé ${results.length} résultat(s)`);
-            return results.slice(0, 10); // Limiter à 10 résultats
-            
-        } catch (error) {
-            console.error("❌ Erreur lors de la recherche:", error);
-            return [];
-        }
-    }
-
-    async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        console.log(`📺 Récupération des épisodes pour: ${id}`);
-        
-        try {
-            // Charger la page de l'anime
-            const response = await fetch(id);
+            const response = await fetch(`${this.SEANIME_API}${encodeURIComponent(url)}`);
             if (!response.ok) {
                 console.error(`❌ Erreur HTTP: ${response.status}`);
-                return [];
+                return "";
             }
-            
-            const html = await response.text();
-            const $ = await LoadDoc(html);
-            
-            const episodes: EpisodeDetails[] = [];
-            
-            // Chercher les liens vers les saisons/épisodes
-            // Structure : /catalogue/{anime}/episodes/{saison}
-            const seasonLinks = $("a[href*='/episodes/']");
-            
-            if (seasonLinks.length() === 0) {
-                console.log("Pas de saisons trouvées, vérification directe des épisodes");
-                // Peut-être qu'on est déjà sur une page d'épisodes
-                return await this.parseEpisodesFromPage(id, $);
-            }
-            
-            // Si plusieurs saisons, prendre la première ou celle demandée
-            const seasonUrl = seasonLinks.first().attr("href");
-            if (!seasonUrl) {
-                console.error("❌ Aucune URL de saison trouvée");
-                return [];
-            }
-            
-            const fullSeasonUrl = seasonUrl.startsWith('http') ? seasonUrl : this.SITE_URL + seasonUrl;
-            
-            // Charger la page de la saison
-            const seasonResponse = await fetch(fullSeasonUrl);
-            if (!seasonResponse.ok) {
-                console.error(`❌ Erreur HTTP saison: ${seasonResponse.status}`);
-                return [];
-            }
-            
-            const seasonHtml = await seasonResponse.text();
-            const $season = await LoadDoc(seasonHtml);
-            
-            return await this.parseEpisodesFromPage(fullSeasonUrl, $season);
-            
+            return await response.text();
         } catch (error) {
-            console.error("❌ Erreur lors de la récupération des épisodes:", error);
-            return [];
+            console.error("❌ Erreur lors du fetch:", error);
+            return "";
         }
     }
 
-    async findEpisodeServer(episode: EpisodeDetails, server: string): Promise<EpisodeServer> {
-        console.log(`🎬 Récupération vidéo - Épisode ${episode.number} - Serveur: ${server}`);
-        
-        try {
-            // Charger la page de l'épisode
-            const response = await fetch(episode.id);
-            if (!response.ok) {
-                console.error(`❌ Erreur HTTP: ${response.status}`);
-                return this.emptyEpisodeServer(server);
-            }
-            
-            const html = await response.text();
-            const $ = await LoadDoc(html);
-            
-            // Chercher les iframes ou les liens des serveurs vidéo
-            const videoSources: VideoSource[] = [];
-            
-            // Méthode 1: Chercher les iframes
-            $("iframe").each((i, element) => {
-                const src = $(element).attr("src");
-                if (src && this.isVideoServer(src, server)) {
-                    console.log(`✅ Iframe trouvé pour ${server}: ${src}`);
-                    videoSources.push({
-                        url: src,
-                        type: "hls",
-                        quality: `${server} - Auto`,
-                        subtitles: []
-                    });
-                }
-            });
-            
-            // Méthode 2: Chercher dans le script les URLs
-            if (videoSources.length === 0) {
-                const scriptTags = $("script");
-                scriptTags.each((i, element) => {
-                    const scriptContent = $(element).html();
-                    if (scriptContent && scriptContent.includes(server)) {
-                        // Extraire l'URL du serveur depuis le script
-                        const urlMatch = scriptContent.match(/['"](https?:\/\/[^'"]+)['"]/g);
-                        if (urlMatch) {
-                            for (const match of urlMatch) {
-                                const url = match.replace(/['"]/g, '');
-                                if (this.isVideoServer(url, server)) {
-                                    console.log(`✅ URL trouvée dans script pour ${server}: ${url}`);
-                                    videoSources.push({
-                                        url: url,
-                                        type: "hls",
-                                        quality: `${server} - Auto`,
-                                        subtitles: []
-                                    });
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            
-            // Si on a trouvé des sources, les extraire
-            if (videoSources.length > 0) {
-                // Pour chaque source, essayer d'extraire le vrai lien vidéo
-                const finalSources: VideoSource[] = [];
-                
-                for (const source of videoSources) {
-                    const extracted = await this.extractVideoFromEmbed(source.url, server);
-                    if (extracted.length > 0) {
-                        finalSources.push(...extracted);
-                    } else {
-                        finalSources.push(source);
-                    }
-                }
-                
-                const referer = episode.id.split("/").slice(0, 3).join("/");
-                return {
-                    headers: {
-                        referer: referer,
-                        origin: referer
-                    },
-                    server: server,
-                    videoSources: finalSources
-                };
-            }
-            
-            console.error(`❌ Aucune source vidéo trouvée pour le serveur: ${server}`);
-            return this.emptyEpisodeServer(server);
-            
-        } catch (error) {
-            console.error("❌ Erreur lors de la récupération de la vidéo:", error);
-            return this.emptyEpisodeServer(server);
-        }
+    private normalizeString(str: string): string {
+        return str.toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[:']/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
-
-    //#endregion
-
-    //#region Méthodes utilitaires
 
     private calculateMatchScore(text: string, searchTerms: string[]): number {
         let score = 0;
-        const textWords = text.split(' ');
+        const normalizedText = this.normalizeString(text);
+        const textWords = normalizedText.split(' ');
         
         for (const term of searchTerms) {
-            if (text.includes(term)) {
+            const normalizedTerm = this.normalizeString(term);
+            if (normalizedText.includes(normalizedTerm)) {
                 score += 1;
-                // Bonus si le terme est un mot complet
-                if (textWords.includes(term)) {
+                if (textWords.includes(normalizedTerm)) {
                     score += 0.5;
                 }
             }
@@ -284,79 +109,38 @@ class Provider {
         return score / searchTerms.length;
     }
 
-    private async parseEpisodesFromPage(pageUrl: string, $: any): Promise<EpisodeDetails[]> {
-        const episodes: EpisodeDetails[] = [];
-        
-        // Chercher les liens d'épisodes
-        // Structure possible : /catalogue/{anime}/episodes/{saison}/{episode}
-        $("a[href*='episode']").each((i, element) => {
-            const href = $(element).attr("href");
-            const text = $(element).text();
-            
-            if (!href) return;
-            
-            // Extraire le numéro d'épisode
-            const epMatch = href.match(/episode[s]?[-_\/]?(\d+)/i) || text.match(/(?:episode|ep\.?)\s*(\d+)/i);
-            const episodeNumber = epMatch ? parseInt(epMatch[1], 10) : episodes.length + 1;
-            
-            const episodeUrl = href.startsWith('http') ? href : this.SITE_URL + href;
-            
-            episodes.push({
-                id: episodeUrl,
-                url: episodeUrl,
-                number: episodeNumber
-            });
-        });
-        
-        // Si aucun épisode trouvé, chercher des boutons ou divs cliquables
-        if (episodes.length === 0) {
-            $("button, div[data-episode], [class*='episode']").each((i, element) => {
-                const dataEp = $(element).attr("data-episode");
-                const onClick = $(element).attr("onclick");
-                
-                if (dataEp || onClick) {
-                    const episodeNumber = dataEp ? parseInt(dataEp, 10) : i + 1;
-                    // Pour l'instant, utiliser l'URL de la page comme base
-                    episodes.push({
-                        id: `${pageUrl}?ep=${episodeNumber}`,
-                        url: `${pageUrl}?ep=${episodeNumber}`,
-                        number: episodeNumber
-                    });
-                }
-            });
-        }
-        
-        console.log(`✅ Trouvé ${episodes.length} épisode(s)`);
-        return episodes.sort((a, b) => a.number - b.number);
-    }
-
-    private isVideoServer(url: string, serverName: string): boolean {
-        const lowerUrl = url.toLowerCase();
-        const lowerServer = serverName.toLowerCase();
-        
-        return lowerUrl.includes(lowerServer) ||
-               lowerUrl.includes(serverName.replace('stream', '')) ||
-               this.getSettings().episodeServers.some(s => lowerUrl.includes(s.toLowerCase()));
-    }
-
     private async extractVideoFromEmbed(embedUrl: string, serverName: string): Promise<VideoSource[]> {
         try {
             console.log(`🔍 Extraction vidéo depuis embed: ${embedUrl}`);
             
-            const response = await fetch(`${this.SEANIME_API}${encodeURIComponent(embedUrl)}`);
-            const html = await response.text();
+            const html = await this.fetchWithProxy(embedUrl);
+            if (!html) return [];
             
             const videoSources: VideoSource[] = [];
             
             // Chercher les liens m3u8
-            const m3u8Regex = /https?:\/\/[^'"\\s]+\.m3u8(?:\?[^\s'"\\]*)?/g;
+            const m3u8Regex = /https?:\/\/[^\s'"<>]+\.m3u8(?:\?[^\s'"<>]*)?/g;
             const m3u8Matches = html.match(m3u8Regex);
             
             if (m3u8Matches) {
                 for (const url of m3u8Matches) {
+                    // Si c'est un master.m3u8, on récupère les qualités
+                    if (url.includes('master')) {
+                        const qualities = await this.extractQualitiesFromMaster(url);
+                        if (qualities.length > 0) {
+                            videoSources.push(...qualities.map(q => ({
+                                url: q.url,
+                                type: "hls" as VideoSourceType,
+                                quality: `${serverName} - ${q.quality}`,
+                                subtitles: []
+                            })));
+                            continue;
+                        }
+                    }
+                    
                     videoSources.push({
                         url: url,
-                        type: "hls",
+                        type: "hls" as VideoSourceType,
                         quality: `${serverName} - Auto`,
                         subtitles: []
                     });
@@ -364,7 +148,7 @@ class Provider {
             }
             
             // Chercher les liens mp4
-            const mp4Regex = /https?:\/\/[^'"\\s]+\.mp4(?:\?[^\s'"\\]*)?/g;
+            const mp4Regex = /https?:\/\/[^\s'"<>]+\.mp4(?:\?[^\s'"<>]*)?/g;
             const mp4Matches = html.match(mp4Regex);
             
             if (mp4Matches) {
@@ -372,7 +156,7 @@ class Provider {
                     const quality = this.detectQuality(url) || "Auto";
                     videoSources.push({
                         url: url,
-                        type: "mp4",
+                        type: "mp4" as VideoSourceType,
                         quality: `${serverName} - ${quality}`,
                         subtitles: []
                     });
@@ -387,9 +171,319 @@ class Provider {
         }
     }
 
+    private async extractQualitiesFromMaster(masterUrl: string): Promise<{url: string, quality: string}[]> {
+        try {
+            const html = await this.fetchWithProxy(masterUrl);
+            if (!html || !html.includes("#EXTM3U")) return [];
+            
+            const qualities: {url: string, quality: string}[] = [];
+            const lines = html.split("\n");
+            let currentQuality = "";
+            
+            for (const line of lines) {
+                if (line.startsWith("#EXT-X-STREAM-INF")) {
+                    const resMatch = line.match(/RESOLUTION=\d+x(\d+)/);
+                    if (resMatch) {
+                        const height = parseInt(resMatch[1]);
+                        if (height >= 1080) currentQuality = "1080p";
+                        else if (height >= 720) currentQuality = "720p";
+                        else if (height >= 480) currentQuality = "480p";
+                        else if (height >= 360) currentQuality = "360p";
+                        else currentQuality = "Auto";
+                    }
+                } else if (line.trim() && !line.startsWith("#")) {
+                    let url = line.trim();
+                    if (!url.startsWith("http")) {
+                        const baseUrl = masterUrl.substring(0, masterUrl.lastIndexOf('/'));
+                        url = `${baseUrl}/${url}`;
+                    }
+                    if (currentQuality) {
+                        qualities.push({ url, quality: currentQuality });
+                        currentQuality = "";
+                    }
+                }
+            }
+            
+            return qualities;
+        } catch (error) {
+            console.error("❌ Erreur extraction master:", error);
+            return [];
+        }
+    }
+
     private detectQuality(url: string): string | null {
         const match = url.match(/(\d{3,4})p/);
         return match ? match[1] + "p" : null;
+    }
+
+    //#endregion
+
+    //#region Main Methods
+
+    async search(opts: SearchOptions): Promise<SearchResult[]> {
+        console.log(`🔍 Recherche pour: "${opts.query}"`);
+        
+        try {
+            // Charger le catalogue
+            const response = await fetch(this.CATALOGUE_URL);
+            if (!response.ok) {
+                console.error(`❌ Erreur HTTP catalogue: ${response.status}`);
+                return [];
+            }
+            
+            const html = await response.text();
+            const $ = await LoadDoc(html);
+            
+            // Normaliser la requête de recherche
+            const searchTerms = this.normalizeString(opts.query).split(' ');
+            const results: SearchResult[] = [];
+            
+            // Parser tous les animes du catalogue
+            const animeLinks = $("a[href^='/catalogue/']");
+            
+            for (let i = 0; i < animeLinks.length(); i++) {
+                const element = animeLinks.eq(i);
+                const href = element.attr("href");
+                
+                if (!href || href === "/catalogue") continue;
+                
+                // Chercher le titre (peut être dans h3, h2, ou texte direct)
+                let title = element.find("h3").text().trim() || 
+                           element.find("h2").text().trim() || 
+                           element.text().trim();
+                
+                if (!title) continue;
+                
+                // Calculer le score de correspondance
+                const matchScore = this.calculateMatchScore(title, searchTerms);
+                
+                if (matchScore > 0.3) {
+                    const animeUrl = href.startsWith('http') ? href : this.SITE_URL + href;
+                    
+                    results.push({
+                        id: animeUrl,
+                        title: title,
+                        url: animeUrl,
+                        subOrDub: opts.dub ? "dub" : "sub",
+                    });
+                }
+            }
+            
+            // Trier par pertinence
+            results.sort((a, b) => {
+                const scoreA = this.calculateMatchScore(a.title, searchTerms);
+                const scoreB = this.calculateMatchScore(b.title, searchTerms);
+                return scoreB - scoreA;
+            });
+            
+            console.log(`✅ Trouvé ${results.length} résultat(s)`);
+            return results.slice(0, 10);
+            
+        } catch (error) {
+            console.error("❌ Erreur lors de la recherche:", error);
+            return [];
+        }
+    }
+
+    async findEpisodes(id: string): Promise<EpisodeDetails[]> {
+        console.log(`📺 Récupération des épisodes pour: ${id}`);
+        
+        try {
+            const response = await fetch(id);
+            if (!response.ok) {
+                console.error(`❌ Erreur HTTP: ${response.status}`);
+                return [];
+            }
+            
+            const html = await response.text();
+            const $ = await LoadDoc(html);
+            
+            const episodes: EpisodeDetails[] = [];
+            
+            // Méthode 1: Chercher les boutons d'épisodes
+            const episodeButtons = $("button[data-episode], a[data-episode], div[data-episode]");
+            
+            if (episodeButtons.length() > 0) {
+                for (let i = 0; i < episodeButtons.length(); i++) {
+                    const element = episodeButtons.eq(i);
+                    const episodeNum = parseInt(element.attr("data-episode") || "0");
+                    const episodeUrl = element.attr("href") || element.attr("data-url") || `${id}/episode-${episodeNum}`;
+                    
+                    episodes.push({
+                        id: episodeUrl.startsWith('http') ? episodeUrl : this.SITE_URL + episodeUrl,
+                        url: episodeUrl.startsWith('http') ? episodeUrl : this.SITE_URL + episodeUrl,
+                        number: episodeNum
+                    });
+                }
+            }
+            
+            // Méthode 2: Chercher dans les scripts
+            if (episodes.length === 0) {
+                const scripts = $("script");
+                for (let i = 0; i < scripts.length(); i++) {
+                    const scriptContent = scripts.eq(i).html();
+                    if (scriptContent && scriptContent.includes("episode")) {
+                        // Chercher des patterns comme {episode: 1, url: "..."}
+                        const episodeMatches = scriptContent.matchAll(/episode["\s:]+(\d+)/g);
+                        for (const match of episodeMatches) {
+                            const epNum = parseInt(match[1]);
+                            episodes.push({
+                                id: `${id}/episode-${epNum}`,
+                                url: `${id}/episode-${epNum}`,
+                                number: epNum
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // Méthode 3: Chercher des liens directs
+            if (episodes.length === 0) {
+                const episodeLinks = $("a[href*='episode']");
+                for (let i = 0; i < episodeLinks.length(); i++) {
+                    const element = episodeLinks.eq(i);
+                    const href = element.attr("href");
+                    if (!href) continue;
+                    
+                    const epMatch = href.match(/episode[-_]?(\d+)/i);
+                    if (epMatch) {
+                        const epNum = parseInt(epMatch[1]);
+                        const fullUrl = href.startsWith('http') ? href : this.SITE_URL + href;
+                        episodes.push({
+                            id: fullUrl,
+                            url: fullUrl,
+                            number: epNum
+                        });
+                    }
+                }
+            }
+            
+            // Dédupliquer et trier
+            const uniqueEpisodes = Array.from(new Map(
+                episodes.map(ep => [ep.number, ep])
+            ).values());
+            
+            uniqueEpisodes.sort((a, b) => a.number - b.number);
+            
+            console.log(`✅ Trouvé ${uniqueEpisodes.length} épisode(s)`);
+            return uniqueEpisodes;
+            
+        } catch (error) {
+            console.error("❌ Erreur lors de la récupération des épisodes:", error);
+            return [];
+        }
+    }
+
+    async findEpisodeServer(episode: EpisodeDetails, server: string): Promise<EpisodeServer> {
+        console.log(`🎬 Récupération vidéo - Épisode ${episode.number} - Serveur: ${server}`);
+        
+        try {
+            const response = await fetch(episode.id);
+            if (!response.ok) {
+                console.error(`❌ Erreur HTTP: ${response.status}`);
+                return this.emptyEpisodeServer(server);
+            }
+            
+            const html = await response.text();
+            const $ = await LoadDoc(html);
+            
+            const videoSources: VideoSource[] = [];
+            let serverUrl: string | undefined;
+            
+            // Méthode 1: Chercher les iframes
+            const iframes = $("iframe");
+            for (let i = 0; i < iframes.length(); i++) {
+                const src = iframes.eq(i).attr("src");
+                if (src && this.isVideoServer(src, server)) {
+                    serverUrl = src;
+                    console.log(`✅ Iframe trouvé pour ${server}: ${src}`);
+                    break;
+                }
+            }
+            
+            // Méthode 2: Chercher dans les boutons de serveur
+            if (!serverUrl) {
+                const serverButtons = $(`button[data-server*="${server}"], a[data-server*="${server}"]`);
+                if (serverButtons.length() > 0) {
+                    const dataUrl = serverButtons.first().attr("data-url") || serverButtons.first().attr("data-src");
+                    if (dataUrl) {
+                        serverUrl = dataUrl;
+                        console.log(`✅ URL serveur trouvée dans bouton: ${dataUrl}`);
+                    }
+                }
+            }
+            
+            // Méthode 3: Chercher dans les scripts
+            if (!serverUrl) {
+                const scripts = $("script");
+                for (let i = 0; i < scripts.length(); i++) {
+                    const scriptContent = scripts.eq(i).html();
+                    if (scriptContent && scriptContent.includes(server)) {
+                        const urlMatches = scriptContent.match(/['"](https?:\/\/[^'"]+)['"]/g);
+                        if (urlMatches) {
+                            for (const match of urlMatches) {
+                                const url = match.replace(/['"]/g, '');
+                                if (this.isVideoServer(url, server)) {
+                                    serverUrl = url;
+                                    console.log(`✅ URL trouvée dans script: ${url}`);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (serverUrl) break;
+                }
+            }
+            
+            // Extraire les sources vidéo
+            if (serverUrl) {
+                const extracted = await this.extractVideoFromEmbed(serverUrl, server);
+                if (extracted.length > 0) {
+                    videoSources.push(...extracted);
+                } else {
+                    // Fallback: retourner l'iframe directement
+                    videoSources.push({
+                        url: serverUrl,
+                        type: "hls" as VideoSourceType,
+                        quality: `${server} - Auto`,
+                        subtitles: []
+                    });
+                }
+            }
+            
+            if (videoSources.length > 0) {
+                const referer = episode.id.split("/").slice(0, 3).join("/");
+                return {
+                    headers: {
+                        referer: referer,
+                        origin: referer
+                    },
+                    server: server,
+                    videoSources: videoSources
+                };
+            }
+            
+            console.error(`❌ Aucune source vidéo trouvée pour le serveur: ${server}`);
+            return this.emptyEpisodeServer(server);
+            
+        } catch (error) {
+            console.error("❌ Erreur lors de la récupération de la vidéo:", error);
+            return this.emptyEpisodeServer(server);
+        }
+    }
+
+    //#endregion
+
+    //#region Helper Methods
+
+    private isVideoServer(url: string, serverName: string): boolean {
+        const lowerUrl = url.toLowerCase();
+        const lowerServer = serverName.toLowerCase();
+        
+        return lowerUrl.includes(lowerServer) ||
+               lowerUrl.includes(serverName.replace('stream', '')) ||
+               this.getSettings().episodeServers.some(s => lowerUrl.includes(s.toLowerCase()));
     }
 
     private emptyEpisodeServer(server: string): EpisodeServer {
